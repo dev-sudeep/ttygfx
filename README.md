@@ -127,4 +127,13 @@ No screen clearing or delays.
 ## License
 MIT License
 
+## License
+
+This project is licensed under the MIT License.
+
+## Dependencies
+
+This project depends on Zstandard (zstd), which is dual-licensed
+under BSD or GPLv2. This project uses zstd under the
+BSD license.
 
