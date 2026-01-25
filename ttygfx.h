@@ -2,6 +2,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #define ESC "\x1b"
 #define PIXELTEXT_DEF "  "
@@ -113,3 +117,107 @@ static inline void Reset_tty(){
 	printf(ESC "[0m");
 	printf(ESC "[?25h");
 }
+
+static inline int read_bpic(const char *path, int compression_level){
+    char filef[8192];
+    char last2[3];
+    size_t len = strlen(path);
+    int dl = compression_level;
+
+    /* Infer compression level from extension if not provided */
+    if(dl < 0){
+        if(len >= 7){
+            last2[0] = path[len - 2];
+            last2[1] = path[len - 1];
+            last2[2] = '\0';
+            dl = atoi(last2);
+        }else{
+            fprintf(stderr, "File not having extension and compression level not provided\n");
+            return 1;
+        }
+    }
+
+    /* Decompress if needed */
+    if(dl == 0){
+        strcpy(filef, path);
+    }else{
+        pid_t pid = fork();
+        if(pid < 0){
+            perror("fork error");
+            return 1;
+        }
+
+        if(pid == 0){
+            int fd = open("/dev/null", O_WRONLY);
+            if(fd < 0){
+                perror("Failed to open /dev/null");
+                _exit(1);
+            }
+            dup2(fd, STDOUT_FILENO);
+
+            execlp(
+                "zstd",
+                "zstd",
+                "-d",
+                path,
+                "-o",
+                "ttygfxtmpfiledecompressed.bpic0",
+                NULL
+            );
+
+            perror("Failed to decompress using zstd");
+            _exit(1);
+        }else{
+            if(waitpid(pid, NULL, 0) < 0){
+                perror("waitpid error");
+                return 1;
+            }
+        }
+
+        strcpy(filef, "ttygfxtmpfiledecompressed.bpic0");
+    }
+
+    /* Read and render */
+    int fd = open(filef, O_RDONLY);
+    if(fd < 0){
+        perror("unable to open file");
+        return 1;
+    }
+
+    char buf[3];
+    int b;
+    int x = 0, y = 0;
+
+    printf(ESC "[2J");
+
+    while((b = read(fd, buf, 3)) > 0){
+        if(buf[0] == '\x20' && buf[1] == '\x0a' && buf[2] == '\x20'){
+            y++;
+            x = 0;
+            continue;
+        }
+
+        Pixel p = {
+            (Point){ x, y },
+            (Color){ buf[0], buf[1], buf[2] }
+        };
+
+        DrawPixel(p, PIXELTEXT_DEF, T_BG);
+        x += 2;
+    }
+
+    if(b < 0){
+        perror("read error");
+        close(fd);
+        return 1;
+    }
+
+    close(fd);
+
+    if(dl != 0){
+        remove("ttygfxtmpfiledecompressed.bpic0");
+    }
+
+    return 0;
+}
+
