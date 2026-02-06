@@ -6,6 +6,9 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/select.h>
+#include <sys/wait.h>
+#include <termios.h>
 
 #define ESC "\x1b"
 #define PIXELTEXT_DEF "  "
@@ -29,10 +32,15 @@ struct TPixel {
     struct TColor color;
 };
 
+struct TMouseEvent{
+    struct TPoint position;
+    int button;
+};
+
 typedef struct TPoint Point;
 typedef struct TColor Color;
 typedef struct TPixel Pixel;
-
+typedef struct TMouseEvent MouseEvent;
 static inline void RefreshScreen(int framerate)
 {
     static int first = 1;
@@ -114,8 +122,8 @@ static inline void DrawLine(
 }
 
 static inline void Reset_tty(){
-	printf(ESC "[0m");
-	printf(ESC "[?25h");
+  printf(ESC "[0m");
+  printf(ESC "[?25h");
 }
 
 static inline int read_bpic(const char *path, int compression_level){
@@ -221,3 +229,74 @@ static inline int read_bpic(const char *path, int compression_level){
     return 0;
 }
 
+static struct termios orig_termios;
+
+static inline void ttygfx_enable_raw(void) {
+    struct termios raw;
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    raw = orig_termios;
+
+    raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+    raw.c_iflag &= ~(IXON | ICRNL);
+    raw.c_oflag &= ~(OPOST);
+    raw.c_cc[VMIN]  = 0;
+    raw.c_cc[VTIME] = 0;
+
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+static inline void ttygfx_disable_raw(void) {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+
+static inline void enable_Mouse(){
+    ttygfx_enable_raw();
+    printf("\033[?1000h"); // basic mouse clicks
+    printf("\033[?1006h"); // SGR extended mode (recommended)
+    fflush(stdout); 
+}
+
+static inline struct TMouseEvent* is_mouseevent(void) {
+    static struct TMouseEvent ev;
+    char buf[32];
+    fd_set set;
+    struct timeval tv = {0, 0};
+
+    FD_ZERO(&set);
+    FD_SET(STDIN_FILENO, &set);
+
+    if (select(STDIN_FILENO + 1, &set, NULL, NULL, &tv) <= 0)
+        return NULL;
+
+    int n = read(STDIN_FILENO, buf, sizeof(buf) - 1);
+    if (n <= 0)
+        return NULL;
+
+    buf[n] = '\0';
+
+    // Expect: ESC [ < b ; x ; y M
+    if (buf[0] != '\033' || buf[1] != '[' || buf[2] != '<')
+        return NULL;
+
+    int b, x, y;
+    char type;
+
+    if (sscanf(buf, "\033[<%d;%d;%d%c", &b, &x, &y, &type) != 4)
+        return NULL;
+
+    if (type != 'M')   // ignore release events ('m')
+        return NULL;
+
+    ev.button = b;
+    ev.position.x = x;
+    ev.position.y = y;
+    return &ev;
+}
+
+static inline void disable_mouse(){
+    printf("\033[?1000l");
+    printf("\033[?1006l");
+    fflush(stdout);
+    ttygfx_disable_raw();
+}
