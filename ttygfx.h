@@ -12,6 +12,18 @@
 
 #define ESC "\x1b"
 #define PIXELTEXT_DEF "  "
+#define RED (Color){255, 0, 0}
+#define ORANGE (Color){255, 128, 0}
+#define YELLOW (Color){255, 255, 0}
+#define GREEN (Color){0, 255, 0}
+#define BLUE (Color){0, 0, 255}
+#define PURPLE (Color){255, 0, 255}
+#define WHITE (Color){255, 255, 255}
+#define BLACK (Color){0, 0, 0}
+
+#define BPIXEL(color) color.r, color.g, color.b
+#define B_NL '\x20', '\x0a', '\x20' 
+
 
 enum T_LAYER { T_FG = 38, T_BG = 48 };
 enum T_DRAWMODE { picture, animated };
@@ -59,6 +71,10 @@ static inline void RefreshScreen(int framerate)
     }
 
     fflush(stdout);
+}
+
+static inline void move_cursor(Point p){
+    printf(ESC "[%d;%dH", p.y + 1, p.x + 1);
 }
 
 static inline void DrawPixel(struct TPixel p,
