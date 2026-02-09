@@ -53,6 +53,15 @@ typedef struct TPoint Point;
 typedef struct TColor Color;
 typedef struct TPixel Pixel;
 typedef struct TMouseEvent MouseEvent;
+
+static inline int MEAN(int a, int b){
+    return (int)(a+b/2);
+}
+
+static inline Color MIX (Color c1, Color c2){
+    return (Color){MEAN(c1.r, c2.r), MEAN(c1.g, c2.g), MEAN(c1.b, c2.b)};
+}
+
 static inline void RefreshScreen(int framerate)
 {
     static int first = 1;
