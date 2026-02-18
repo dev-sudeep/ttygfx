@@ -1,0 +1,20 @@
+MAGIC
+1: ESC 
+2: 'B'
+3. 'P'
+4. 'I'
+5. 'C'
+6. '_'
+7. X      // First digit of compression level in human readable character
+8. X      // Second digit of compression level in human readable character
+PADDING
+9. NUL
+DATA
+10. X     // '1' if alpha channel, '0' otherwise
+PADDING
+11. NUL
+12. ESC
+13. NUL
+14. NUL
+15. ESC
+16. NUL

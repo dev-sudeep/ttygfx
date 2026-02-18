@@ -151,25 +151,77 @@ static inline void Reset_tty(){
   printf(ESC "[?25h");
 }
 
-static inline int read_bpic(const char *path, int compression_level){
-    char filef[8192];
-    char last2[3];
-    size_t len = strlen(path);
-    int dl = compression_level;
+Color get_terminal_bg() {
+    Color c = {0, 0, 0};
+    ttygfx_enable_raw();
 
-    /* Infer compression level from extension if not provided */
-    if(dl < 0){
-        if(len >= 7){
-            last2[0] = path[len - 2];
-            last2[1] = path[len - 1];
-            last2[2] = '\0';
-            dl = atoi(last2);
-        }else{
-            fprintf(stderr, "File not having extension and compression level not provided\n");
-            return 1;
-        }
+   // 2. Send the OSC 11 query: "What is your background color?"
+    // \033]11;?\007
+    printf("\033]11;?\007");
+    fflush(stdout);
+
+    // 3. Read the response from stdin
+    // Format is usually: ^]11;rgb:RRRR/GGGG/BBBB^G
+    char response[64];
+    int n = 0;
+    
+    // Read until the terminator (BEL \007 or ST \033\\)
+    while (n < sizeof(response) - 1) {
+        if (read(STDIN_FILENO, &response[n], 1) <= 0) break;
+        if (response[n] == '\007') break; // End of response
+        n++;
+    }
+    response[n] = '\0';
+
+    // 4. Restore terminal settings immediately
+    ttygfx_disable_raw();
+
+    // 5. Parse the hex values (using sscanf here since the response IS text)
+    // Note: Terminals often use 16-bit hex (RRRR), so we scale to 8-bit
+    unsigned int r, g, b;
+    if (sscanf(strstr(response, "rgb:"), "rgb:%x/%x/%x", &r, &g, &b) == 3) {
+        // If the terminal sends 16-bit values (0xFFFF), scale them to 0-255
+        c.r = (r > 0xFF) ? (r >> 8) : r;
+        c.g = (g > 0xFF) ? (g >> 8) : g;
+        c.b = (b > 0xFF) ? (b >> 8) : b;
     }
 
+    return c;
+}
+
+static inline int read_bpic(const char *path){
+    char filef[8192];
+    char dl_char[2];
+    char alpha_char;
+    size_t len = strlen(path);
+    int dl;
+    bool isalpha;
+    FILE* fp = fopen(path, "rb");
+    char magic[16];
+    char* p;
+
+    if(!fp){
+        perror("Unable to open file");
+        exit(1);
+    }
+    /* Infer compression level from magic if not provided */
+    fread(magic, 1, 16, fp);
+    p=&magic[0];
+    char* a = malloc(6);
+    memcpy(a, p, 6);
+    if(strcmp(a, ESC "BPIC_")){
+        printf("File format not recognised");
+        exit(1);
+    }
+    p += 6;
+    memcpy(dl_char, p, 2);
+    p += 3;
+    memcpy(&alpha_char, p, 1);
+    p += 7;
+    isalpha = alpha_char == '1' ? true:false;
+    dl = atoi(dl_char);
+    fclose(fp);
+    free(a);
     /* Decompress if needed */
     if(dl == 0){
         strcpy(filef, path);
@@ -217,13 +269,13 @@ static inline int read_bpic(const char *path, int compression_level){
         return 1;
     }
 
-    char buf[3];
+    char buf[3 + isalpha];
     int b;
     int x = 0, y = 0;
 
     printf(ESC "[2J");
 
-    while((b = read(fd, buf, 3)) > 0){
+    while((b = read(fd, buf, 3 + isalpha)) > 0){
         if(buf[0] == '\x20' && buf[1] == '\x0a' && buf[2] == '\x20'){
             y++;
             x = 0;
@@ -234,7 +286,9 @@ static inline int read_bpic(const char *path, int compression_level){
             (Point){ x, y },
             (Color){ buf[0], buf[1], buf[2] }
         };
-
+        if(isalpha){
+            p.color = MIX(p.color, get_terminal_bg());
+        }
         DrawPixel(p, PIXELTEXT_DEF, T_BG);
         x += 2;
     }
