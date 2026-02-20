@@ -1,6 +1,8 @@
 #pragma once
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <fcntl.h>
@@ -9,6 +11,7 @@
 #include <sys/select.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <zstd.h>
 
 #define ESC "\x1b"
 #define PIXELTEXT_DEF "  "
@@ -53,6 +56,9 @@ typedef struct TPoint Point;
 typedef struct TColor Color;
 typedef struct TPixel Pixel;
 typedef struct TMouseEvent MouseEvent;
+
+static inline void ttygfx_enable_raw(void);
+static inline void ttygfx_disable_raw(void);
 
 static inline int MEAN(int a, int b){
     return (int)(a+b/2);
@@ -189,8 +195,7 @@ Color get_terminal_bg() {
     return c;
 }
 
-static inline int read_bpic(const char *path){
-    char filef[8192];
+/*static inline int read_bpic(const char *path){
     char dl_char[2];
     char alpha_char;
     size_t len = strlen(path);
@@ -204,7 +209,7 @@ static inline int read_bpic(const char *path){
         perror("Unable to open file");
         exit(1);
     }
-    /* Infer compression level from magic if not provided */
+    /* Infer compression level from magic if not provided 
     fread(magic, 1, 16, fp);
     p=&magic[0];
     char* a = malloc(6);
@@ -220,11 +225,21 @@ static inline int read_bpic(const char *path){
     p += 7;
     isalpha = alpha_char == '1' ? true:false;
     dl = atoi(dl_char);
+    fseek(fp, 0, SEEK_END);
+    int size = ftell(fp);
+    char* data = malloc(size - 15);
+    fseek(fp, 16, SEEK_SET);
+    fread(data, 1, size - 16, fp);
+    data[size - 16] = '\0';
     fclose(fp);
     free(a);
-    /* Decompress if needed */
+    int fdp1[2], fdp2[2];
+    pipe(fdp1);
+    pipe(fdp2);
+    char* dcdata = malloc(size - 15);
+    /* Decompress if needed 
     if(dl == 0){
-        strcpy(filef, path);
+        dcdata = data;
     }else{
         pid_t pid = fork();
         if(pid < 0){
@@ -233,81 +248,78 @@ static inline int read_bpic(const char *path){
         }
 
         if(pid == 0){
-            int fd = open("/dev/null", O_WRONLY);
-            if(fd < 0){
-                perror("Failed to open /dev/null");
-                _exit(1);
-            }
-            dup2(fd, STDOUT_FILENO);
+            dup2(fdp2[1], STDOUT_FILENO);
+            dup2(fdp1[0], STDIN_FILENO);
+
+            close(fdp1[0]);
+            close(fdp1[1]);
+            close(fdp2[0]);
+            
 
             execlp(
                 "zstd",
                 "zstd",
                 "-d",
-                path,
+                "-"
                 "-o",
-                "ttygfxtmpfiledecompressed.bpic0",
+                "ttygfxtmpfiledecompressed.bpic00",
+                "-c",
                 NULL
             );
 
             perror("Failed to decompress using zstd");
             _exit(1);
         }else{
+            close(fdp1[0]);
+
+        // 2. Write the string to the pipe
+            write(fdp1[1], data, strlen(data));
+
+        // 3. Close the write end to signal EOF
+            close(fdp1[1]);
+
+            read(fdp2[0], dcdata, size-16);
+            
+            close(fdp2[0]);
+            close(fdp2[1]);
+
             if(waitpid(pid, NULL, 0) < 0){
                 perror("waitpid error");
                 return 1;
             }
         }
 
-        strcpy(filef, "ttygfxtmpfiledecompressed.bpic0");
     }
 
-    /* Read and render */
-    int fd = open(filef, O_RDONLY);
-    if(fd < 0){
-        perror("unable to open file");
-        return 1;
-    }
-
-    char buf[3 + isalpha];
+    /* Read and render 
+    p = dcdata;
     int b;
     int x = 0, y = 0;
 
     printf(ESC "[2J");
 
-    while((b = read(fd, buf, 3 + isalpha)) > 0){
-        if(buf[0] == '\x20' && buf[1] == '\x0a' && buf[2] == '\x20'){
+    for(; p < p + size-16; p += 3+isalpha){
+        if(p[0] == '\x20' && p[1] == '\x0a' && p[2] == '\x20'){
+            x=0;
             y++;
-            x = 0;
             continue;
         }
-
-        Pixel p = {
-            (Point){ x, y },
-            (Color){ buf[0], buf[1], buf[2] }
-        };
+        Color c = (Color){p[0], p[1], p[2]};
         if(isalpha){
-            p.color = MIX(p.color, get_terminal_bg());
+            Color bg = get_terminal_bg();
+            c.r += ((bg.r-c.r)/255)*p[3];
+            c.g += ((bg.g-c.g)/255)*p[3];
+            c.b += ((bg.b-c.b)/255)*p[3];
         }
-        DrawPixel(p, PIXELTEXT_DEF, T_BG);
-        x += 2;
-    }
-
-    if(b < 0){
-        perror("read error");
-        close(fd);
-        return 1;
-    }
-
-    close(fd);
-
-    if(dl != 0){
-        remove("ttygfxtmpfiledecompressed.bpic0");
+        Pixel pix;
+        pix.position={x+1, y+1};
+        pix.color = c;
+        DrawPixel(pix, PIXELTEXT_DEF, T_BG);
     }
 
     return 0;
 }
-
+*/
 static struct termios orig_termios;
 
 static inline void ttygfx_enable_raw(void) {
@@ -324,6 +336,134 @@ static inline void ttygfx_enable_raw(void) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
+static inline int read_bpic(const char* path){
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        perror("Unable to open file");
+        return 1;
+    }
+
+    /* ---- Read header ---- */
+    uint8_t magic[16];
+    if (fread(magic, 1, 16, fp) != 16) {
+        fprintf(stderr, "Invalid BPIC header\n");
+        fclose(fp);
+        return 1;
+    }
+
+    /* Validate magic */
+    if (memcmp(magic, "\x1B""BPIC_", 6) != 0) {
+        fprintf(stderr, "File format not recognised\n");
+        fclose(fp);
+        return 1;
+    }
+
+    /* Compression level (ASCII digits) */
+    int dl = (magic[6] - '0') * 10 + (magic[7] - '0');
+
+    /* Alpha flag */
+    bool isalpha = (magic[9] == '1');
+
+    /* ---- Read entire payload ---- */
+    fseek(fp, 0, SEEK_END);
+    long filesize = ftell(fp);
+    fseek(fp, 16, SEEK_SET);
+
+    size_t compressed_size = filesize - 16;
+    uint8_t *compressed = malloc(compressed_size);
+    if (!compressed) {
+        perror("malloc failed");
+        fclose(fp);
+        return 1;
+    }
+
+    if (fread(compressed, 1, compressed_size, fp) != compressed_size) {
+        fprintf(stderr, "Failed to read BPIC data\n");
+        free(compressed);
+        fclose(fp);
+        return 1;
+    }
+
+    fclose(fp);
+    
+    uint8_t *data = NULL;
+    size_t decompressed_size = compressed_size;
+
+    if (dl == 0) {
+        /* No compression */
+        data = compressed;
+    } else {
+        unsigned long long expected_size =
+            ZSTD_getFrameContentSize(compressed, compressed_size);
+
+        if (expected_size == ZSTD_CONTENTSIZE_ERROR ||
+            expected_size == ZSTD_CONTENTSIZE_UNKNOWN) {
+            fprintf(stderr, "Invalid or unknown ZSTD frame size\n");
+            free(compressed);
+            return 1;
+        }
+
+        decompressed_size = (size_t)expected_size;
+        data = malloc(decompressed_size);
+        if (!data) {
+            perror("malloc failed");
+            free(compressed);
+            return 1;
+        }
+
+        size_t result = ZSTD_decompress(
+            data,
+            decompressed_size,
+            compressed,
+            compressed_size
+        );
+        
+
+        free(compressed);
+    }
+
+    printf("\x1B[2J");  // clear screen
+
+    size_t pixel_size = 3 + (isalpha ? 1 : 0);
+    uint8_t *p = data;
+    uint8_t *end = data + decompressed_size;
+
+    int x = 0, y = 0;
+
+    while (p + pixel_size <= end) {
+
+        /* newline marker */
+        if (p[0] == 0x20 && p[1] == 0x0A && p[2] == 0x20) {
+            x = 0;
+            y++;
+            p += pixel_size;
+            continue;
+        }
+
+        Color c = { p[0], p[1], p[2] };
+
+        if (isalpha) {
+            uint8_t a = p[3];
+            Color bg = get_terminal_bg();
+
+            /* Correct alpha blending */
+            c.r = (c.r * a + bg.r * (255 - a)) / 255;
+            c.g = (c.g * a + bg.g * (255 - a)) / 255;
+            c.b = (c.b * a + bg.b * (255 - a)) / 255;
+        }
+        Pixel pix;
+        pix.position = (Point){ x + 1, y + 1 };
+        pix.color = c;
+
+        DrawPixel(pix, PIXELTEXT_DEF, T_BG);
+
+        x += 2;
+        p += pixel_size;
+    }
+
+    free(data);
+    
+}
 static inline void ttygfx_disable_raw(void) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
 }

@@ -1,16 +1,12 @@
 #include "ttygfx.h"
 
 int main(){
-    char bstr[] = {BPIXEL(RED), BPIXEL(ORANGE), BPIXEL(YELLOW), 
-                   BPIXEL(GREEN), B_NL, BPIXEL(BLUE), BPIXEL(PURPLE), 
-                   BPIXEL(WHITE), BPIXEL(BLACK), B_NL, 
-                   BPIXEL(MIX(RED, GREEN)), BPIXEL(MIX(GREEN, BLUE)), BPIXEL(MIX(RED, BLUE))};
+    char bstr[] = "\x1b" "BPIC_00" "\0" "0" "\0\x1b\0\0\x1b\0" "\xff\x00\x00\x00\xff\x00\x00\x00\xff";
     FILE* fp = fopen("test.bpic00", "wb");
     if(!fp){
         exit(1);
     }
-    fwrite(bstr, 1, sizeof(bstr), fp);
+    fwrite(bstr, 1, 25, fp);
     fclose(fp);
-    system("zstd test.bpic00 -o test.bpic03");
 
 }
