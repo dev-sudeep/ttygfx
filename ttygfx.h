@@ -152,49 +152,55 @@ static inline void DrawLine(
     }
 }
 
-static inline void Reset_tty(){
-  printf(ESC "[0m");
-  printf(ESC "[?25h");
-}
-
 Color get_terminal_bg() {
-    Color c = {0, 0, 0};
-    ttygfx_enable_raw();
+    Color color = {0, 0, 0};
+    struct termios old_t, new_t;
 
-   // 2. Send the OSC 11 query: "What is your background color?"
-    // \033]11;?\007
+    // 1. Save terminal settings and disable echoing/canonical mode
+    tcgetattr(STDIN_FILENO, &old_t);
+    new_t = old_t;
+    new_t.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_t);
+
+    // 2. Send OSC 11 query: ESC ] 11 ; ? BEL
     printf("\033]11;?\007");
     fflush(stdout);
 
-    // 3. Read the response from stdin
-    // Format is usually: ^]11;rgb:RRRR/GGGG/BBBB^G
-    char response[64];
-    int n = 0;
-    
-    // Read until the terminator (BEL \007 or ST \033\\)
-    while (n < sizeof(response) - 1) {
-        if (read(STDIN_FILENO, &response[n], 1) <= 0) break;
-        if (response[n] == '\007') break; // End of response
-        n++;
+    // 3. Read response: Expecting something like \033]11;rgb:rrrr/gggg/bbbb\007
+    // or \033]11;rgb:rr/gg/bb\033\\
+
+    char buffer[64];
+    int n = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
+
+    if (n > 0) {
+        buffer[n] = '\0';
+        // Find the "rgb:" marker
+        char *rgb_ptr = strstr(buffer, "rgb:");
+        if (rgb_ptr) {
+            unsigned int r, g, b;
+            // Termux usually returns 16-bit hex (rrrr/gggg/bbbb)
+            // We scan them and shift/scale if necessary
+            if (sscanf(rgb_ptr, "rgb:%x/%x/%x", &r, &g, &b) == 3) {
+                // If it's 16-bit (0xFFFF), scale it down to 8-bit (0xFF)
+                if (strstr(rgb_ptr, "rgb:0000") == NULL && r > 0xFF) {
+                    color.r = r >> 8;
+                    color.g = g >> 8;
+                    color.b = b >> 8;
+                } else {
+                    color.r = r;
+                    color.g = g;
+                    color.b = b;
+                }
+            }
+        }
     }
-    response[n] = '\0';
 
-    // 4. Restore terminal settings immediately
-    ttygfx_disable_raw();
+    // 4. Restore terminal settings
+    tcsetattr(STDIN_FILENO, TCSANOW, &old_t);
 
-    // 5. Parse the hex values (using sscanf here since the response IS text)
-    // Note: Terminals often use 16-bit hex (RRRR), so we scale to 8-bit
-    unsigned int r, g, b;
-    if (sscanf(strstr(response, "rgb:"), "rgb:%x/%x/%x", &r, &g, &b) == 3) {
-        // If the terminal sends 16-bit values (0xFFFF), scale them to 0-255
-        c.r = (r > 0xFF) ? (r >> 8) : r;
-        c.g = (g > 0xFF) ? (g >> 8) : g;
-        c.b = (b > 0xFF) ? (b >> 8) : b;
-    }
-
-    return c;
+    return color;
 }
-
+  
 /*static inline int read_bpic(const char *path){
     char dl_char[2];
     char alpha_char;
