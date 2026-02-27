@@ -27,6 +27,8 @@
 #define BPIXEL(color) color.r, color.g, color.b
 #define B_NL '\x20', '\x0a', '\x20' 
 
+#define BPIC_HEADER_SIZE 16
+
 
 enum T_LAYER { T_FG = 38, T_BG = 48 };
 enum T_DRAWMODE { picture, animated };
@@ -106,6 +108,7 @@ static inline void DrawPixel(struct TPixel p,
            p.color.g,
            p.color.b,
            pt);
+    fflush(stdout);
 }
 
 static inline void DrawLine(
@@ -178,8 +181,8 @@ Color get_terminal_bg() {
         char *rgb_ptr = strstr(buffer, "rgb:");
         if (rgb_ptr) {
             unsigned int r, g, b;
-            // Termux usually returns 16-bit hex (rrrr/gggg/bbbb)
-            // We scan them and shift/scale if necessary
+            
+            // We scan them and shift/scale 16 bit hex if necessary
             if (sscanf(rgb_ptr, "rgb:%x/%x/%x", &r, &g, &b) == 3) {
                 // If it's 16-bit (0xFFFF), scale it down to 8-bit (0xFF)
                 if (strstr(rgb_ptr, "rgb:0000") == NULL && r > 0xFF) {
@@ -200,132 +203,7 @@ Color get_terminal_bg() {
 
     return color;
 }
-  
-/*static inline int read_bpic(const char *path){
-    char dl_char[2];
-    char alpha_char;
-    size_t len = strlen(path);
-    int dl;
-    bool isalpha;
-    FILE* fp = fopen(path, "rb");
-    char magic[16];
-    char* p;
 
-    if(!fp){
-        perror("Unable to open file");
-        exit(1);
-    }
-    /* Infer compression level from magic if not provided 
-    fread(magic, 1, 16, fp);
-    p=&magic[0];
-    char* a = malloc(6);
-    memcpy(a, p, 6);
-    if(strcmp(a, ESC "BPIC_")){
-        printf("File format not recognised");
-        exit(1);
-    }
-    p += 6;
-    memcpy(dl_char, p, 2);
-    p += 3;
-    memcpy(&alpha_char, p, 1);
-    p += 7;
-    isalpha = alpha_char == '1' ? true:false;
-    dl = atoi(dl_char);
-    fseek(fp, 0, SEEK_END);
-    int size = ftell(fp);
-    char* data = malloc(size - 15);
-    fseek(fp, 16, SEEK_SET);
-    fread(data, 1, size - 16, fp);
-    data[size - 16] = '\0';
-    fclose(fp);
-    free(a);
-    int fdp1[2], fdp2[2];
-    pipe(fdp1);
-    pipe(fdp2);
-    char* dcdata = malloc(size - 15);
-    /* Decompress if needed 
-    if(dl == 0){
-        dcdata = data;
-    }else{
-        pid_t pid = fork();
-        if(pid < 0){
-            perror("fork error");
-            return 1;
-        }
-
-        if(pid == 0){
-            dup2(fdp2[1], STDOUT_FILENO);
-            dup2(fdp1[0], STDIN_FILENO);
-
-            close(fdp1[0]);
-            close(fdp1[1]);
-            close(fdp2[0]);
-            
-
-            execlp(
-                "zstd",
-                "zstd",
-                "-d",
-                "-"
-                "-o",
-                "ttygfxtmpfiledecompressed.bpic00",
-                "-c",
-                NULL
-            );
-
-            perror("Failed to decompress using zstd");
-            _exit(1);
-        }else{
-            close(fdp1[0]);
-
-        // 2. Write the string to the pipe
-            write(fdp1[1], data, strlen(data));
-
-        // 3. Close the write end to signal EOF
-            close(fdp1[1]);
-
-            read(fdp2[0], dcdata, size-16);
-            
-            close(fdp2[0]);
-            close(fdp2[1]);
-
-            if(waitpid(pid, NULL, 0) < 0){
-                perror("waitpid error");
-                return 1;
-            }
-        }
-
-    }
-
-    /* Read and render 
-    p = dcdata;
-    int b;
-    int x = 0, y = 0;
-
-    printf(ESC "[2J");
-
-    for(; p < p + size-16; p += 3+isalpha){
-        if(p[0] == '\x20' && p[1] == '\x0a' && p[2] == '\x20'){
-            x=0;
-            y++;
-            continue;
-        }
-        Color c = (Color){p[0], p[1], p[2]};
-        if(isalpha){
-            Color bg = get_terminal_bg();
-            c.r += ((bg.r-c.r)/255)*p[3];
-            c.g += ((bg.g-c.g)/255)*p[3];
-            c.b += ((bg.b-c.b)/255)*p[3];
-        }
-        Pixel pix;
-        pix.position={x+1, y+1};
-        pix.color = c;
-        DrawPixel(pix, PIXELTEXT_DEF, T_BG);
-    }
-
-    return 0;
-}
-*/
 static struct termios orig_termios;
 
 static inline void ttygfx_enable_raw(void) {
@@ -340,6 +218,64 @@ static inline void ttygfx_enable_raw(void) {
     raw.c_cc[VTIME] = 0;
 
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+static inline void create_bpic(const char* filename, int compression, bool alpha, char* data, long datasize){
+    /*Construct header*/
+    char header[16];
+    header[0] = '\x1b';
+    memcpy(&header[1], "BPIC_", 5);
+    char comp[2];
+    comp[0] = (compression/10) + '0';
+    comp[1] = (compression%10) + '0';
+    memcpy(&header[6], comp, 2);
+    header[8] = 0;
+    header[9] = alpha + '0';
+    header[10] = 0;
+    header[11] = '\x1b';
+    header[12] = 0;
+    header[13] = 0;
+    header[14] = '\x1b';
+    header[15] = 0;
+    
+    /*Create file*/
+    FILE* fp = fopen(filename, "wb");
+    if(!fp){
+        perror("Failed to create file");
+        return;
+    }
+    fwrite(header, 1, 16, fp);
+    
+    /*Perform compression*/
+    size_t compsize;
+    char* compdata = NULL; // Declare outside so it's accessible later
+
+    if (compression == 0) {
+        compsize = datasize;
+        compdata = data; // Note: Ensure you don't 'free' this if it's not from malloc
+    } else {
+        compsize = ZSTD_compressBound(datasize);
+        compdata = (char*)malloc(compsize);
+    
+        if (compdata == NULL) { /* Handle allocation failure */ return; }
+        size_t result = ZSTD_compress(compdata, compsize, data, datasize, compression);
+    
+        if (ZSTD_isError(result)) {
+            fprintf(stderr, "Compression failed: %s\n", ZSTD_getErrorName(result));
+            free(compdata); // Free memory before exiting
+            return;
+        }
+        compsize = result; // Update to actual compressed size
+    }
+
+
+
+
+    /*Write compressed data*/
+    fwrite(compdata, 1, compsize, fp);
+    fclose(fp);
+
+    return;
 }
 
 static inline int read_bpic(const char* path){
