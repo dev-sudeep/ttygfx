@@ -9,7 +9,11 @@ int main(){
 	DrawLine((Point){20, 0}, (Point){20, 10}, (Color){0, 255, 0}, PIXELTEXT_DEF, T_BG);
 	DrawLine((Point){0, 10}, (Point){20, 10}, (Color){0, 0, 255}, PIXELTEXT_DEF, T_BG);
     getchar();
-    read_bpic("demo.bpic13", -1);
+    size_t size;
+    bool alpha;
+    unsigned char* data = read_bpic("test.bpic13", &size, &alpha);
+    render_bpic(data, size, alpha);
+    free(data);
     getchar();
     enable_Mouse();
     int c;
@@ -22,5 +26,5 @@ int main(){
         }
     }
     disable_mouse();
-    Reset_tty();
+    RefreshScreen(0);
 }

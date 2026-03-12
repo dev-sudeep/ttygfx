@@ -278,103 +278,163 @@ static inline void create_bpic(const char* filename, int compression, bool alpha
     return;
 }
 
-static inline int read_bpic(const char* path){
+/*
+ * Improved read_bpic() — drop-in replacement for the version in ttygfx.h
+ *
+ * Changes from the original:
+ *   - Returns uint8_t* (raw decompressed pixel data) instead of int.
+ *   - Writes byte count into *out_size  (pass NULL to ignore).
+ *   - Writes alpha flag  into *out_alpha (pass NULL to ignore).
+ *   - Returns NULL on any error with a descriptive message on stderr.
+ *   - Caller is responsible for free()'ing the returned pointer.
+ *   - Does NOT render to the terminal — all drawing is left to the caller.
+ *   - No longer leaks the compressed buffer when decompression fails.
+ *   - Validates that filesize > 16 before attempting to read pixel data.
+ *
+ * Typical caller pattern:
+ *
+ *   size_t  data_size;
+ *   bool    has_alpha;
+ *   uint8_t *data = read_bpic("art.bpic", &data_size, &has_alpha);
+ *   if (!data) { ... handle error ... }
+ *
+ *   size_t pixel_size = has_alpha ? 4 : 3;
+ *   for (uint8_t *p = data; p + pixel_size <= data + data_size; p += pixel_size) {
+ *       if (p[0] == 0x20 && p[1] == 0x0A && p[2] == 0x20) {
+ *           // row separator — advance to next row
+ *       } else {
+ *           Color c = { p[0], p[1], p[2] };
+ *           if (has_alpha) { uint8_t a = p[3]; ... alpha blend ... }
+ *       }
+ *   }
+ *   free(data);
+ */
+static inline uint8_t *read_bpic(const char *path,
+                                  size_t     *out_size,
+                                  bool       *out_alpha)
+{
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        perror("Unable to open file");
-        return 1;
+        perror("read_bpic: fopen");
+        return NULL;
     }
 
-    /* ---- Read header ---- */
-    uint8_t magic[16];
-    if (fread(magic, 1, 16, fp) != 16) {
-        fprintf(stderr, "Invalid BPIC header\n");
+    /* ---- Read and validate 16-byte header ---- */
+    uint8_t hdr[16];
+    if (fread(hdr, 1, 16, fp) != 16) {
+        fprintf(stderr, "read_bpic: file too short for header\n");
         fclose(fp);
-        return 1;
+        return NULL;
     }
 
-    /* Validate magic */
-    if (memcmp(magic, "\x1B""BPIC_", 6) != 0) {
-        fprintf(stderr, "File format not recognised\n");
+    if (memcmp(hdr, "\x1B""BPIC_", 6) != 0) {
+        fprintf(stderr, "read_bpic: unrecognised file format\n");
         fclose(fp);
-        return 1;
+        return NULL;
     }
 
-    /* Compression level (ASCII digits) */
-    int dl = (magic[6] - '0') * 10 + (magic[7] - '0');
+    int  compression = (hdr[6] - '0') * 10 + (hdr[7] - '0');
+    bool has_alpha   = (hdr[9] == '1');
 
-    /* Alpha flag */
-    bool isalpha = (magic[9] == '1');
-
-    /* ---- Read entire payload ---- */
+    /* ---- Read payload ---- */
     fseek(fp, 0, SEEK_END);
     long filesize = ftell(fp);
     fseek(fp, 16, SEEK_SET);
 
-    size_t compressed_size = filesize - 16;
-    uint8_t *compressed = malloc(compressed_size);
-    if (!compressed) {
-        perror("malloc failed");
+    if (filesize <= 16) {
+        fprintf(stderr, "read_bpic: file contains no pixel data\n");
         fclose(fp);
-        return 1;
+        return NULL;
     }
 
-    if (fread(compressed, 1, compressed_size, fp) != compressed_size) {
-        fprintf(stderr, "Failed to read BPIC data\n");
-        free(compressed);
+    size_t   payload_size = (size_t)(filesize - 16);
+    uint8_t *payload      = malloc(payload_size);
+    if (!payload) {
+        perror("read_bpic: malloc payload");
         fclose(fp);
-        return 1;
+        return NULL;
     }
 
+    if (fread(payload, 1, payload_size, fp) != payload_size) {
+        fprintf(stderr, "read_bpic: short read on payload\n");
+        free(payload);
+        fclose(fp);
+        return NULL;
+    }
     fclose(fp);
-    
-    uint8_t *data = NULL;
-    size_t decompressed_size = compressed_size;
 
-    if (dl == 0) {
-        /* No compression */
-        data = compressed;
+    /* ---- Decompress if needed ---- */
+    uint8_t *data      = NULL;
+    size_t   data_size = 0;
+
+    if (compression == 0) {
+        /* Uncompressed: payload IS the data */
+        data      = payload;
+        data_size = payload_size;
     } else {
-        unsigned long long expected_size =
-            ZSTD_getFrameContentSize(compressed, compressed_size);
+        unsigned long long expected =
+            ZSTD_getFrameContentSize(payload, payload_size);
 
-        if (expected_size == ZSTD_CONTENTSIZE_ERROR ||
-            expected_size == ZSTD_CONTENTSIZE_UNKNOWN) {
-            fprintf(stderr, "Invalid or unknown ZSTD frame size\n");
-            free(compressed);
-            return 1;
+        if (expected == ZSTD_CONTENTSIZE_ERROR ||
+            expected == ZSTD_CONTENTSIZE_UNKNOWN) {
+            fprintf(stderr, "read_bpic: cannot determine decompressed size\n");
+            free(payload);
+            return NULL;
         }
 
-        decompressed_size = (size_t)expected_size;
-        data = malloc(decompressed_size);
+        data_size = (size_t)expected;
+        data      = malloc(data_size);
         if (!data) {
-            perror("malloc failed");
-            free(compressed);
-            return 1;
+            perror("read_bpic: malloc decompressed buffer");
+            free(payload);
+            return NULL;
         }
 
-        size_t result = ZSTD_decompress(
-            data,
-            decompressed_size,
-            compressed,
-            compressed_size
-        );
-        
+        size_t result = ZSTD_decompress(data, data_size, payload, payload_size);
+        free(payload); /* always freed here, success or failure */
 
-        free(compressed);
+        if (ZSTD_isError(result)) {
+            fprintf(stderr, "read_bpic: decompression failed: %s\n",
+                    ZSTD_getErrorName(result));
+            free(data);
+            return NULL;
+        }
+
+        data_size = result; /* actual bytes written by ZSTD */
     }
 
-    printf("\x1B[2J");  // clear screen
+    if (out_size)  *out_size  = data_size;
+    if (out_alpha) *out_alpha = has_alpha;
 
-    size_t pixel_size = 3 + (isalpha ? 1 : 0);
-    uint8_t *p = data;
-    uint8_t *end = data + decompressed_size;
+    return data; /* caller must free() */
+}
 
+static inline int render_bpic(const uint8_t *data,
+                               size_t         data_size,
+                               bool           has_alpha)
+{
+    if (!data) {
+        fprintf(stderr, "render_bpic: NULL data pointer\n");
+        return -1;
+    }
+
+    size_t pixel_size = has_alpha ? 4 : 3;
+
+    /* Query the terminal background once up-front if we need it for blending */
+    Color bg = {0, 0, 0};
+    if (has_alpha)
+        bg = get_terminal_bg();
+
+    printf("\x1B[2J");   /* clear screen */
+    printf("\x1B[H");    /* move cursor to top-left */
+
+    const uint8_t *p   = data;
+    const uint8_t *end = data + data_size;
     int x = 0, y = 0;
 
     while (p + pixel_size <= end) {
 
-        /* newline marker */
+        /* Row-separator marker: 0x20 0x0A 0x20 */
         if (p[0] == 0x20 && p[1] == 0x0A && p[2] == 0x20) {
             x = 0;
             y++;
@@ -384,28 +444,26 @@ static inline int read_bpic(const char* path){
 
         Color c = { p[0], p[1], p[2] };
 
-        if (isalpha) {
+        if (has_alpha) {
             uint8_t a = p[3];
-            Color bg = get_terminal_bg();
-
-            /* Correct alpha blending */
-            c.r = (c.r * a + bg.r * (255 - a)) / 255;
-            c.g = (c.g * a + bg.g * (255 - a)) / 255;
-            c.b = (c.b * a + bg.b * (255 - a)) / 255;
+            c.r = (uint8_t)((c.r * a + bg.r * (255 - a)) / 255);
+            c.g = (uint8_t)((c.g * a + bg.g * (255 - a)) / 255);
+            c.b = (uint8_t)((c.b * a + bg.b * (255 - a)) / 255);
         }
+
         Pixel pix;
         pix.position = (Point){ x + 1, y + 1 };
-        pix.color = c;
-
+        pix.color    = c;
         DrawPixel(pix, PIXELTEXT_DEF, T_BG);
 
-        x += 2;
+        x += 2;  /* each cell is two terminal columns wide (PIXELTEXT_DEF = "  ") */
         p += pixel_size;
     }
 
-    free(data);
-    
+    fflush(stdout);
+    return 0;
 }
+
 static inline void ttygfx_disable_raw(void) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
 }
